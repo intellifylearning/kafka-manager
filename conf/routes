@@ -11,7 +11,7 @@ GET         /kafka-manager/clusters/:c                                  controll
 GET         /kafka-manager/clusters/:c/topics                           controllers.Topic.topics(c:String)
 GET         /kafka-manager/clusters/:c/topics/addPartitions             controllers.Topic.addPartitionsToMultipleTopics(c:String)
 POST        /kafka-manager/clusters/:c/topics/addPartitions             controllers.Topic.handleAddPartitionsToMultipleTopics(c:String)
-GET         /kafka-manager/clusters/:c/topics/:t                        controllers.Topic.topic(c:String, t:String)
+GET         /kafka-manager/clusters/:c/topics/:t                        controllers.Topic.topic(c:String, t:String, force:Boolean ?= false)
 GET         /kafka-manager/clusters/:c/logkafkas                        controllers.Logkafka.logkafkas(c:String)
 GET         /kafka-manager/clusters/:c/logkafkas/:h/:l                  controllers.Logkafka.logkafka(c:String, h:String, l:String)
 GET         /kafka-manager/clusters/:c/brokers                          controllers.Cluster.brokers(c: String)
