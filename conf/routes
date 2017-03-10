@@ -52,6 +52,7 @@ GET    /kafka-manager/clusters/:c/logkafkas/:h/:l/updateConfig            contro
 POST   /kafka-manager/clusters/:c/logkafkas/:h/:l/updateConfig            controllers.Logkafka.handleUpdateConfig(c:String, h:String, l:String)
 POST   /kafka-manager/clusters/:c/logkafkas/:h/:l/disableConfig           controllers.Logkafka.handleDisableConfig(c:String, h:String, l:String)
 POST   /kafka-manager/clusters/:c/logkafkas/:h/:l/enableConfig            controllers.Logkafka.handleEnableConfig(c:String, h:String, l:String)
+GET    /kafka-manager/api/status/:c/brokers/extended                      controllers.api.KafkaStateCheck.brokersExtended(c:String)
 GET    /kafka-manager/api/status/:c/brokers                               controllers.api.KafkaStateCheck.brokers(c:String)
 GET    /kafka-manager/api/status/:c/topics                                controllers.api.KafkaStateCheck.topics(c:String)
 GET    /kafka-manager/api/status/:c/topicIdentities                       controllers.api.KafkaStateCheck.topicIdentities(c:String)
