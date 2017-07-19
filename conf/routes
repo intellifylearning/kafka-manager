@@ -6,7 +6,7 @@
 # ~~~~
 
 # Home page
-GET    /kafka-manager                                                    controllers.Application.index
+GET    /kafka-manager/                                                    controllers.Application.index
 GET    /kafka-manager/clusters/:c                                         controllers.Cluster.cluster(c:String)
 GET    /kafka-manager/clusters/:c/topics                                  controllers.Topic.topics(c:String)
 GET    /kafka-manager/clusters/:c/topics/addPartitions                    controllers.Topic.addPartitionsToMultipleTopics(c:String)
