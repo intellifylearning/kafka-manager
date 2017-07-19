@@ -6,7 +6,7 @@
 # ~~~~
 
 # Home page
-GET    /kafka-manager/                                                    controllers.Application.index
+GET    /kafka-manager                                                    controllers.Application.index
 GET    /kafka-manager/clusters/:c                                         controllers.Cluster.cluster(c:String)
 GET    /kafka-manager/clusters/:c/topics                                  controllers.Topic.topics(c:String)
 GET    /kafka-manager/clusters/:c/topics/addPartitions                    controllers.Topic.addPartitionsToMultipleTopics(c:String)
@@ -52,22 +52,25 @@ GET    /kafka-manager/clusters/:c/logkafkas/:h/:l/updateConfig            contro
 POST   /kafka-manager/clusters/:c/logkafkas/:h/:l/updateConfig            controllers.Logkafka.handleUpdateConfig(c:String, h:String, l:String)
 POST   /kafka-manager/clusters/:c/logkafkas/:h/:l/disableConfig           controllers.Logkafka.handleDisableConfig(c:String, h:String, l:String)
 POST   /kafka-manager/clusters/:c/logkafkas/:h/:l/enableConfig            controllers.Logkafka.handleEnableConfig(c:String, h:String, l:String)
-GET    /kafka-manager/api/status/:c/brokers/extended                      controllers.api.KafkaStateCheck.brokersExtended(c:String)
 GET    /kafka-manager/api/status/:c/brokers                               controllers.api.KafkaStateCheck.brokers(c:String)
+GET    /kafka-manager/api/status/:c/brokers/extended                      controllers.api.KafkaStateCheck.brokersExtended(c:String)
 GET    /kafka-manager/api/status/:c/topics                                controllers.api.KafkaStateCheck.topics(c:String)
 GET    /kafka-manager/api/status/:c/topicIdentities                       controllers.api.KafkaStateCheck.topicIdentities(c:String)
 GET    /kafka-manager/api/status/clusters                                 controllers.api.KafkaStateCheck.clusters
 GET    /kafka-manager/api/status/:c/:t/underReplicatedPartitions          controllers.api.KafkaStateCheck.underReplicatedPartitions(c:String,t:String)
 GET    /kafka-manager/api/status/:c/:t/unavailablePartitions              controllers.api.KafkaStateCheck.unavailablePartitions(c:String,t:String)
-GET    /kafka-manager/api/status/:cluster/:consumer/:topic/topicSummary   controllers.api.KafkaStateCheck.topicSummaryAction(cluster:String, consumer:String, topic:String, consumerType:String)
-GET    /kafka-manager/api/status/:cluster/:consumer/groupSummary          controllers.api.KafkaStateCheck.groupSummaryAction(cluster:String, consumer:String, consumerType:String)
+GET    /kafka-manager/api/status/:cluster/:consumer/:topic/:consumerType/topicSummary   controllers.api.KafkaStateCheck.topicSummaryAction(cluster:String, consumer:String, topic:String, consumerType:String)
+GET    /kafka-manager/api/status/:cluster/:consumer/:consumerType/groupSummary          controllers.api.KafkaStateCheck.groupSummaryAction(cluster:String, consumer:String, consumerType:String)
 GET    /kafka-manager/api/status/:cluster/consumersSummary                controllers.api.KafkaStateCheck.consumersSummaryAction(cluster:String)
 
 # Versioned Assets
-GET         /kafka-manager/vassets/*file          controllers.Assets.versioned(path="/public", file: Asset)
+GET    /kafka-manager/vassets/*file                                       controllers.Assets.versioned(path="/public", file: Asset)
 
 # Unversioned Assets
-GET         /kafka-manager/assets/*file           controllers.Assets.at(path="/public", file)
+GET    /kafka-manager/assets/*file                                        controllers.Assets.at(path="/public", file)
 
 # WebJars
-GET         /kafka-manager/webjars/*file          controllers.WebJarAssets.at(file)
+GET    /kafka-manager/webjars/*file                                       controllers.WebJarAssets.at(file)
+
+# Ping / Health Check
+GET    /kafka-manager/api/health                                          controllers.ApiHealth.ping
