@@ -32,6 +32,7 @@ import kafka.manager.utils.zero90.{GroupMetadata, MemberMetadata}
 import org.apache.curator.framework.CuratorFramework
 import org.apache.curator.framework.recipes.cache.PathChildrenCache.StartMode
 import org.apache.curator.framework.recipes.cache._
+import org.apache.kafka.clients.CommonClientConfigs
 import org.apache.kafka.clients.consumer.{Consumer, ConsumerRecords, KafkaConsumer}
 import org.joda.time.{DateTime, DateTimeZone}
 
@@ -47,7 +48,7 @@ import kafka.manager.utils._
 
 import scala.collection.JavaConverters._
 
-case class KafkaAdminClientActorConfig(clusterContext: ClusterContext, longRunningPoolConfig: LongRunningPoolConfig, kafkaStateActorPath: ActorPath)
+case class KafkaAdminClientActorConfig(clusterContext: ClusterContext, longRunningPoolConfig: LongRunningPoolConfig, kafkaStateActorPath: ActorPath, consumerProperties: Option[Properties])
 case class KafkaAdminClientActor(config: KafkaAdminClientActorConfig) extends BaseClusterQueryActor with LongRunningPoolActor {
 
   private[this] var adminClientOption : Option[AdminClient] = None
@@ -81,10 +82,19 @@ case class KafkaAdminClientActor(config: KafkaAdminClientActorConfig) extends Ba
 
   private def createAdminClient(bl: BrokerList): AdminClient = {
     val targetBrokers : IndexedSeq[BrokerIdentity] = bl.list
-    var brokerListStr: String = targetBrokers.map(b => s"${b.host}:${b.port}").mkString(",")
-
-    log.info(s"Creating admin client with broker list : $brokerListStr")
-    AdminClient.createSimplePlaintext(brokerListStr)
+    val brokerListStr: String = targetBrokers.map {
+      b =>
+        val port = b.endpoints(config.clusterContext.config.securityProtocol)
+        s"${b.host}:$port"
+    }.mkString(",")
+    val props = new Properties()
+    config.consumerProperties.foreach {
+      cp => props.putAll(cp)
+    }
+    props.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, config.clusterContext.config.securityProtocol.stringId)
+    props.put(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG, brokerListStr)
+    log.info(s"Creating admin client with security protocol=${config.clusterContext.config.securityProtocol.stringId} , broker list : $brokerListStr")
+    AdminClient.create(props)
   }
 
   override def processQueryRequest(request: QueryRequest): Unit = {
@@ -144,7 +154,7 @@ class KafkaAdminClient(context: => ActorContext, adminClientActorPath: ActorPath
 
 
 object KafkaManagedOffsetCache {
-  val supportedVersions: Set[KafkaVersion] = Set(Kafka_0_8_2_0, Kafka_0_8_2_1, Kafka_0_8_2_2, Kafka_0_9_0_0, Kafka_0_9_0_1, Kafka_0_10_0_0, Kafka_0_10_0_1, Kafka_0_10_1_0, Kafka_0_10_1_1, Kafka_0_10_2_0, Kafka_0_10_2_1)
+  val supportedVersions: Set[KafkaVersion] = Set(Kafka_0_8_2_0, Kafka_0_8_2_1, Kafka_0_8_2_2, Kafka_0_9_0_0, Kafka_0_9_0_1, Kafka_0_10_0_0, Kafka_0_10_0_1, Kafka_0_10_1_0, Kafka_0_10_1_1, Kafka_0_10_2_0, Kafka_0_10_2_1, Kafka_0_11_0_0, Kafka_0_11_0_2, Kafka_1_0_0)
   val ConsumerOffsetTopic = "__consumer_offsets"
 
   def isSupported(version: KafkaVersion) : Boolean = {
@@ -180,9 +190,14 @@ case class KafkaManagedOffsetCache(clusterContext: ClusterContext
 
   private[this] def createKafkaConsumer(): Consumer[Array[Byte], Array[Byte]] = {
     val hostname = InetAddress.getLocalHost.getHostName
+    val brokerListStr: String = bootstrapBrokerList.list.map {
+      b =>
+        val port = b.endpoints(clusterContext.config.securityProtocol)
+        s"${b.host}:$port"
+    }.mkString(",")
     val props: Properties = new Properties()
     props.put(org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG, s"KMOffsetCache-$hostname")
-    props.put(org.apache.kafka.clients.consumer.ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapBrokerList.list.map(bi => s"${bi.host}:${bi.port}").mkString(","))
+    props.put(org.apache.kafka.clients.consumer.ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, brokerListStr)
     props.put(org.apache.kafka.clients.consumer.ConsumerConfig.EXCLUDE_INTERNAL_TOPICS_CONFIG, "false")
     props.put(org.apache.kafka.clients.consumer.ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false")
     props.put(org.apache.kafka.clients.consumer.ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArrayDeserializer")
@@ -191,6 +206,7 @@ case class KafkaManagedOffsetCache(clusterContext: ClusterContext
     consumerProperties.foreach {
       cp => props.putAll(cp)
     }
+    props.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, clusterContext.config.securityProtocol.stringId)
     Try {
       info("Constructing new kafka consumer client using these properties: ")
       props.asScala.foreach {
@@ -397,8 +413,11 @@ trait OffsetCache extends Logging {
       }.groupBy(_._1)
     }
 
-    def getSimpleConsumer(bi: BrokerIdentity) =
-      new SimpleConsumer(bi.host, bi.port, getSimpleConsumerSocketTimeoutMillis, 256 * 1024, clientId)
+    def getSimpleConsumer(bi: BrokerIdentity) = {
+      require(bi.nonSecure, "Cannot fetch log size without PLAINTEXT endpoint!")
+      val port: Int = bi.endpoints(PLAINTEXT)
+      new SimpleConsumer(bi.host, port, getSimpleConsumerSocketTimeoutMillis, 256 * 1024, clientId)
+    }
 
     // Get the latest offset for each partition
     val futureMap: Future[PartitionOffsetsCapture] = {
@@ -467,7 +486,7 @@ trait OffsetCache extends Logging {
 
   private[this] var kafkaManagedOffsetCache : Option[KafkaManagedOffsetCache] = None
 
-  private[this] lazy val secureKafka = getBrokerList().list.exists(_.secure)
+  private[this] lazy val hasNonSecureEndpoint = getBrokerList().list.exists(_.nonSecure)
 
   def start() : Unit = {
     if(KafkaManagedOffsetCache.isSupported(clusterContext.config.version)) {
@@ -495,7 +514,7 @@ trait OffsetCache extends Logging {
   }
 
   def getTopicPartitionOffsets(topic: String, interactive: Boolean) : Future[PartitionOffsetsCapture] = {
-    if((interactive || loadOffsets) && !secureKafka) {
+    if((interactive || loadOffsets) && hasNonSecureEndpoint) {
       partitionOffsetsCache.get(topic)
     } else {
       emptyPartitionOffsetsCapture
@@ -866,7 +885,8 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseClusterQueryCom
   private[this] val kaConfig = KafkaAdminClientActorConfig(
     clusterContext,
     config.kafkaAdminClientPoolConfig,
-    self.path
+    self.path,
+    config.consumerProperties
   )
   private[this] val kaProps = Props(classOf[KafkaAdminClientActor],kaConfig)
   private[this] val kafkaAdminClientActor : ActorPath = context.actorOf(kaProps.withDispatcher(config.pinnedDispatcherName),"kafka-admin-client").path
@@ -1007,6 +1027,8 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseClusterQueryCom
     //the offset cache does not poll on its own so it can be started safely
     log.info("Starting offset cache...")
     offsetCache.start()
+
+    startTopicOffsetGetter()
   }
 
   @scala.throws[Exception](classOf[Exception])
@@ -1020,6 +1042,8 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseClusterQueryCom
   @scala.throws[Exception](classOf[Exception])
   override def postStop(): Unit = {
     log.info("Stopped actor %s".format(self.path))
+
+    Try(stopTopicOffsetGetter())
 
     log.info("Stopping offset cache...")
     Try(offsetCache.stop())
@@ -1048,6 +1072,18 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseClusterQueryCom
     Option(topicsTreeCache.getCurrentData(topicPath)).map( childData => (childData.getStat.getVersion,asString(childData.getData)))
   }
 
+  def getTopicPartitionOffsetsNotFuture(topic: String, interactive: Boolean): PartitionOffsetsCapture = {
+      var partitionOffsets = PartitionOffsetsCapture(System.currentTimeMillis(), Map())
+
+      val loadOffsets = featureGateFold(KMPollConsumersFeature)(false, true)
+      if ((interactive || loadOffsets) &&
+        kafkaTopicOffsetCaptureMap.contains(topic)) {
+        partitionOffsets = kafkaTopicOffsetCaptureMap(topic)
+      }
+
+      partitionOffsets
+  }
+
   def getTopicDescription(topic: String, interactive: Boolean) : Option[TopicDescription] = {
     for {
       description <- getTopicZookeeperData(topic)
@@ -1057,7 +1093,7 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseClusterQueryCom
         val statePath = s"$partitionsPath/$part/state"
         Option(topicsTreeCache.getCurrentData(statePath)).map(cd => (part, asString(cd.getData)))
       }
-      partitionOffsets = offsetCache.getTopicPartitionOffsets(topic, interactive)
+      partitionOffsets = getTopicPartitionOffsetsNotFuture(topic, interactive)
       topicConfig = getTopicConfigString(topic)
     } yield TopicDescription(topic, description, Option(states), partitionOffsets, topicConfig)
   }
@@ -1279,5 +1315,119 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseClusterQueryCom
     Option(fn(topicsTreeCache))
   }
 
+  //---------------------------------------------------
+  private[this] var kafkaTopicOffsetGetter : Option[KafkaTopicOffsetGetter] = None 
+  private[this] var kafkaTopicOffsetMap = new TrieMap[String, Map[Int, Long]]
+  private[this] var kafkaTopicOffsetCaptureMap = new TrieMap[String, PartitionOffsetsCapture]
+  def startTopicOffsetGetter() : Unit = {
+    log.info("Starting kafka managed Topic Offset Getter ...")
+    kafkaTopicOffsetGetter = Option(new KafkaTopicOffsetGetter())
+    val topicOffsetGetterThread = new Thread(kafkaTopicOffsetGetter.get, "KafkaTopicOffsetGetter")
+    topicOffsetGetterThread.start()
+  }
+
+  def stopTopicOffsetGetter() : Unit = {
+    kafkaTopicOffsetGetter.foreach {
+      kto =>
+        Try {
+          log.info("Stopping kafka managed Topic Offset Getter ...")
+          kto.close()
+        }
+    }
+  }
+
+  class KafkaTopicOffsetGetter() extends Runnable {
+    @volatile
+    private[this] var shutdown: Boolean = false
+
+    override def run(): Unit = {
+      import scala.util.control.Breaks._
+
+      while (!shutdown) {
+        try {
+          withTopicsTreeCache {  cache: TreeCache =>
+            cache.getCurrentChildren(ZkUtils.BrokerTopicsPath)
+            }.fold {
+              } { data: java.util.Map[String, ChildData] =>
+                var broker2TopicPartitionMap: Map[BrokerIdentity, List[(TopicAndPartition, PartitionOffsetRequestInfo)]] = Map()
+
+                breakable {
+                  data.asScala.keys.toIndexedSeq.foreach(topic => {
+                    if (shutdown) {
+                     return 
+                    }
+                    var optPartitionsWithLeaders : Option[List[(Int, Option[BrokerIdentity])]] = getPartitionLeaders(topic)
+                    optPartitionsWithLeaders match {
+                      case Some(leaders) => 
+                        leaders.foreach(leader => {
+                          leader._2 match {
+                            case Some(brokerIden) =>
+                              var tlList : List[(TopicAndPartition, PartitionOffsetRequestInfo)] = null
+                              if (broker2TopicPartitionMap.contains(brokerIden)) {
+                                tlList = broker2TopicPartitionMap(brokerIden)
+                              } else {
+                                tlList = List()
+                              }
+                              tlList = (TopicAndPartition(topic, leader._1), PartitionOffsetRequestInfo(-1, 1)) +: tlList
+                              broker2TopicPartitionMap += (brokerIden -> tlList)
+                            case None =>
+                          }
+                        })
+                      case None =>
+                    }
+                  }
+                  )
+                }
+
+                breakable {
+                  broker2TopicPartitionMap.keys.foreach(broker => {
+                    if (shutdown) {
+                     return 
+                    }
+
+                    var tpList = broker2TopicPartitionMap(broker)
+                    val port: Int = broker.endpoints(PLAINTEXT)
+                    var simpleConsumer = new SimpleConsumer(broker.host, port, config.simpleConsumerSocketTimeoutMillis, 256 * 1024, "kafkaTopicOffsetGetter")
+                    try {
+                      val request = OffsetRequest(tpList.toMap)
+                      var tpOffsetMap = simpleConsumer.getOffsetsBefore(request).partitionErrorAndOffsets
+
+                      var topicOffsetMap : Map[Int, Long] = null 
+                      tpOffsetMap.keys.foreach(tp => {
+                        if (kafkaTopicOffsetMap.contains(tp.topic)) {
+                          topicOffsetMap = kafkaTopicOffsetMap(tp.topic)
+                        } else {
+                          topicOffsetMap = Map()
+                        }
+
+                        topicOffsetMap += (tp.partition -> tpOffsetMap(tp).offsets.headOption.getOrElse(0))
+                        kafkaTopicOffsetMap += (tp.topic -> topicOffsetMap)
+                      })
+                    } finally {
+                      simpleConsumer.close()
+                    }
+                  })
+                }
+
+                kafkaTopicOffsetCaptureMap = kafkaTopicOffsetMap.map(kv =>
+                    (kv._1, PartitionOffsetsCapture(System.currentTimeMillis(), kv._2)))
+              }
+      } catch {
+        case e: Exception =>
+          log.error(e, s"KafkaTopicOffsetGetter exception ")
+      }
+
+      if (!shutdown) {
+        Thread.sleep(config.partitionOffsetCacheTimeoutSecs * 1000)
+      }
+    }
+
+    log.info(s"KafkaTopicOffsetGetter exit")
+  }
+
+  def close(): Unit = {
+    this.shutdown = true
+  }
+}
 }
 

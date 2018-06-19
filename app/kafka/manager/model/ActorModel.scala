@@ -197,7 +197,7 @@ object ActorModel {
   case class TopicDescription(topic: String,
                               description: (Int,String),
                               partitionState: Option[Map[String, String]], 
-                              partitionOffsets: Future[PartitionOffsetsCapture],
+                              partitionOffsets: PartitionOffsetsCapture,
                               config:Option[(Int,String)]) extends  QueryResponse
   case class TopicDescriptions(descriptions: IndexedSeq[TopicDescription], lastUpdateMillis: Long) extends QueryResponse
 
@@ -227,12 +227,16 @@ object ActorModel {
   case object DCUpdateState extends CommandRequest
 
   case class GeneratedPartitionAssignments(topic: String, assignments: Map[Int, Seq[Int]], nonExistentBrokers: Set[Int])
-  case class BrokerIdentity(id: Int, host: String, port: Int, jmxPort: Int, secure: Boolean)
 
-  object BrokerIdentity {
+  case class BrokerIdentity(id: Int, host: String, jmxPort: Int, secure: Boolean, nonSecure:Boolean, endpoints: Map[SecurityProtocol, Int]) {
+    def endpointsString: String = endpoints.toList.map(tpl => s"${tpl._1.stringId}:${tpl._2}").mkString(",")
+  }
+
+  object BrokerIdentity extends Logging {
     import org.json4s.jackson.JsonMethods._
     import org.json4s.scalaz.JsonScalaz
     import org.json4s.scalaz.JsonScalaz._
+    import org.json4s.JValue
 
     import scala.language.reflectiveCalls
     import scalaz.Validation.FlatMap._
@@ -241,38 +245,62 @@ object ActorModel {
 
     val DEFAULT_SECURE : JsonScalaz.Result[Boolean] = false.successNel
 
+    def getSecurityProtocol(protocol: String, configJson: JValue): SecurityProtocol = {
+      val protocolFromListenerName = (configJson \ "listener_security_protocol_map" \ protocol).values
+      if (protocolFromListenerName == None)
+        SecurityProtocol(protocol)
+      else
+        SecurityProtocol(protocolFromListenerName.toString)
+    }
+
     implicit def from(brokerId: Int, config: String): Validation[NonEmptyList[JsonScalaz.Error],BrokerIdentity]= {
       val json = parse(config)
       val hostResult = fieldExtended[String]("host")(json)
       val portResult = fieldExtended[Int]("port")(json)
       val jmxPortResult = fieldExtended[Int]("jmx_port")(json)
-      val hostPortResult: JsonScalaz.Result[(String, Int, Boolean)] = json.findField(_._1 == "endpoints").map(_ => fieldExtended[List[String]]("endpoints")(json))
-        .fold((hostResult |@| portResult |@| DEFAULT_SECURE)((a, b, c) => (a, b, c))){
+      val hostPortResult: JsonScalaz.Result[(String, Map[SecurityProtocol, Int])] = json.findField(_._1 == "endpoints").map(_ => fieldExtended[List[String]]("endpoints")(json))
+        .fold((hostResult |@| portResult |@| DEFAULT_SECURE)((a, b, c) => (a, Map(PLAINTEXT.asInstanceOf[SecurityProtocol] -> b)))){
         r =>
           r.flatMap {
             endpointList =>
-              val parsedList = endpointList.map {
+              val parsedList: List[JsonScalaz.Result[(String, Int, SecurityProtocol)]] = endpointList.map {
                 endpoint =>
                   Validation.fromTryCatchNonFatal {
-                    val arr = endpoint.split("://")(1).split(":")
-                    (arr(0), arr(1).toInt, endpoint.toLowerCase.contains("sasl"))
-                  }.leftMap[JsonScalaz.Error](t => UncategorizedError("endpoints", t.getMessage, List.empty)).toValidationNel
+                    val arr1 = endpoint.split("://")
+                    val arr2 = arr1(1).split(":")
+                    (arr2(0), arr2(1).toInt, getSecurityProtocol(arr1(0).toUpperCase, json))
+                  }.leftMap[JsonScalaz.Error](t => {
+                    error(s"Failed to parse endpoint : $endpoint", t)
+                    UncategorizedError("endpoints", t.getMessage, List.empty)
+                  }).toValidationNel
               }
-              parsedList.find(_.isSuccess).fold({
-                val err: JsonScalaz.Result[(String, Int, Boolean)] = Validation.failureNel(UncategorizedError("endpoints", s"failed to parse host and port from json : $config", List.empty))
-                err
+              import _root_.scalaz.Scalaz._
+              val listOfValidation: List[JsonScalaz.Result[(String, Int, SecurityProtocol)]] = parsedList.filter(_.isSuccess)
+              if(listOfValidation.nonEmpty) {
+                val endpoints: JsonScalaz.Result[List[(String, Int, SecurityProtocol)]] = parsedList.filter(_.isSuccess).sequence[JsonScalaz.Result, (String, Int, SecurityProtocol)]
+                val result: JsonScalaz.Result[(String, Map[SecurityProtocol, Int])] = endpoints.flatMap {
+                  list =>
+                    list.foldRight(("", Map.empty[SecurityProtocol, Int])) {
+                      case ((host: String, port: Int, endpointType: SecurityProtocol), (_, map: Map[SecurityProtocol, Int])) =>
+                        (host, map.+(endpointType -> port))
+                    }.successNel[JsonScalaz.Error]
+
+                }
+                result
+              } else {
+                (hostResult |@| portResult |@| DEFAULT_SECURE)((a, b, c) => (a, Map(PLAINTEXT.asInstanceOf[SecurityProtocol] -> b)))
               }
-              )(r => r)
           }
       }
       for {
         tpl <- hostPortResult
         host = tpl._1
         port = tpl._2
-        secure = tpl._3
+        secure = (tpl._2.contains(PLAINTEXT) && tpl._2.size > 1) || (!tpl._2.contains(PLAINTEXT) && tpl._2.nonEmpty)
+        nonSecure = tpl._2.contains(PLAINTEXT)
         jmxPort <- jmxPortResult
       } yield {
-        BrokerIdentity(brokerId, host, port, jmxPort, secure)
+        BrokerIdentity(brokerId, host, jmxPort, secure, nonSecure, tpl._2)
       }
     }
   }
@@ -473,31 +501,10 @@ import scala.language.reflectiveCalls
       // Assign the partition data to the TPI format
       partMap.map { case (partition, replicas) =>
         val partitionNum = partition.toInt
-        // block on the futures that hold the latest produced offset in each partition
-        val partitionOffsets: Option[PartitionOffsetsCapture] = Try {
-          Await.ready(td.partitionOffsets, 2 second).value.get match {
-            case Success(offsetMap) =>
-              Option(offsetMap)
-            case Failure(e) =>
-              None
-          }
-        } match  {
-          case Failure(e) => None
-          case Success(r) => r
-        }
-
-        val previousPartitionOffsets: Option[PartitionOffsetsCapture] = tdPrevious.flatMap {
-          ptd => Try {
-            Await.ready(ptd.partitionOffsets, 2 second).value.get match {
-              case Success(offsetMap) =>
-                Option(offsetMap)
-              case Failure(e) =>
-                None
-            }
-          } match {
-            case Failure(e) => None
-            case Success(r) => r
-          }
+        val partitionOffsets: Option[PartitionOffsetsCapture] = Some(td.partitionOffsets)
+        val previousPartitionOffsets: Option[PartitionOffsetsCapture] = tdPrevious match {
+          case Some(tdP) => Some(tdP.partitionOffsets)
+          case None => None
         }
         
         val currentOffsetOption = partitionOffsets.flatMap(_.offsetsMap.get(partitionNum))
@@ -622,20 +629,11 @@ import scala.language.reflectiveCalls
     def from(ctd: ConsumedTopicDescription, clusterContext: ClusterContext): ConsumedTopicState = {
       val partitionOffsetsMap = ctd.partitionOffsets.getOrElse(Map.empty)
       val partitionOwnersMap = ctd.partitionOwners.getOrElse(Map.empty)
-      // block on the futures that hold the latest produced offset in each partition
-      val topicOffsetsOptMap: Map[Int, Long]= ctd.topicDescription.map{td: TopicDescription =>
-        Try {
-          Await.ready(td.partitionOffsets, 2 second).value.get match {
-            case Success(offsetMap) =>
-              offsetMap.offsetsMap
-            case Failure(e) =>
-              Map.empty[Int, Long]
-          }
-        } match {
-          case Failure(e) => Map.empty[Int, Long]
-          case Success(r) => r
-        }
-      }.getOrElse(Map.empty)
+
+      val topicOffsetsOptMap: Map[Int, Long]= ctd.topicDescription match {
+        case Some(td) => td.partitionOffsets.offsetsMap
+        case None => Map.empty
+      }
 
       ConsumedTopicState(
         ctd.consumer, 
